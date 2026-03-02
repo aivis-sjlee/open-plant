@@ -5,8 +5,7 @@ async function importWithFallback(urls) {
 	let lastError = null;
 	for (const url of urls) {
 		try {
-			// @vite-ignore
-			return await import(url);
+			return await import(/* @vite-ignore */ url);
 		} catch (error) {
 			lastError = error;
 		}

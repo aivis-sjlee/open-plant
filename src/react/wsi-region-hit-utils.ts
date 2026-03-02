@@ -2,16 +2,10 @@ import { type PreparedRoiPolygon, prepareRoiPolygons, toRoiGeometry } from "../w
 import type { WsiRegion } from "../wsi/types";
 import { clamp } from "../wsi/utils";
 import type { WsiTileRenderer } from "../wsi/wsi-tile-renderer";
-import type { DrawCoordinate, RegionLabelStyle, RegionLabelStyleResolver } from "./draw-layer";
-import { mergeRegionLabelStyle } from "./draw-layer";
+import { getTopAnchorFromPolygons, measureLabelTextWidth, mergeRegionLabelStyle } from "./draw-layer-label";
+import type { DrawCoordinate, RegionLabelStyle, RegionLabelStyleResolver } from "./draw-layer-types";
 
-const TOP_ANCHOR_Y_TOLERANCE = 0.5;
-const LABEL_MEASURE_FALLBACK_EM = 0.58;
-const LABEL_MEASURE_CACHE_LIMIT = 4096;
 const REGION_CONTOUR_HIT_DISTANCE_PX = 6;
-
-let sharedLabelMeasureContext: CanvasRenderingContext2D | null = null;
-const labelTextWidthCache = new Map<string, number>();
 
 export interface PreparedRegionHit {
   region: WsiRegion;
@@ -20,39 +14,6 @@ export interface PreparedRegionHit {
   polygons: PreparedRoiPolygon[];
   label: string;
   labelAnchor: DrawCoordinate | null;
-}
-
-export function measureLabelTextWidth(label: string, labelStyle: RegionLabelStyle): number {
-  const key = `${labelStyle.fontWeight}|${labelStyle.fontSize}|${labelStyle.fontFamily}|${label}`;
-  const cached = labelTextWidthCache.get(key);
-  if (cached !== undefined) return cached;
-
-  const fallback = label.length * labelStyle.fontSize * LABEL_MEASURE_FALLBACK_EM;
-  const ctx = getLabelMeasureContext();
-  let width = fallback;
-  if (ctx) {
-    ctx.font = `${labelStyle.fontWeight} ${labelStyle.fontSize}px ${labelStyle.fontFamily}`;
-    const measured = ctx.measureText(label).width;
-    if (Number.isFinite(measured) && measured >= 0) {
-      width = measured;
-    }
-  }
-
-  if (labelTextWidthCache.size > LABEL_MEASURE_CACHE_LIMIT) {
-    labelTextWidthCache.clear();
-  }
-  labelTextWidthCache.set(key, width);
-  return width;
-}
-
-function getLabelMeasureContext(): CanvasRenderingContext2D | null {
-  if (sharedLabelMeasureContext) return sharedLabelMeasureContext;
-  if (typeof document === "undefined") return null;
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
-  sharedLabelMeasureContext = ctx;
-  return sharedLabelMeasureContext;
 }
 
 function toDrawCoordinate(value: unknown): DrawCoordinate | null {
@@ -65,37 +26,6 @@ function toDrawCoordinate(value: unknown): DrawCoordinate | null {
 
 export function resolveRegionId(region: WsiRegion, index: number): string | number {
   return region.id ?? index;
-}
-
-function getTopAnchor(ring: DrawCoordinate[]): DrawCoordinate | null {
-  if (ring.length === 0) return null;
-  let minY = Infinity;
-  for (const point of ring) {
-    if (point[1] < minY) minY = point[1];
-  }
-  if (!Number.isFinite(minY)) return null;
-
-  let minX = Infinity;
-  let maxX = -Infinity;
-  for (const point of ring) {
-    if (Math.abs(point[1] - minY) > TOP_ANCHOR_Y_TOLERANCE) continue;
-    if (point[0] < minX) minX = point[0];
-    if (point[0] > maxX) maxX = point[0];
-  }
-  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return null;
-  return [(minX + maxX) * 0.5, minY];
-}
-
-function getTopAnchorFromPreparedPolygons(polygons: PreparedRoiPolygon[]): DrawCoordinate | null {
-  let best: DrawCoordinate | null = null;
-  for (const polygon of polygons) {
-    const anchor = getTopAnchor(polygon.outer);
-    if (!anchor) continue;
-    if (!best || anchor[1] < best[1] || (anchor[1] === best[1] && anchor[0] < best[0])) {
-      best = anchor;
-    }
-  }
-  return best;
 }
 
 function pointSegmentDistanceSq(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
@@ -178,7 +108,7 @@ export function prepareRegionHits(regions: WsiRegion[]): PreparedRegionHit[] {
       regionId: resolveRegionId(region, i),
       polygons,
       label,
-      labelAnchor: label ? getTopAnchorFromPreparedPolygons(polygons) : null,
+      labelAnchor: label ? getTopAnchorFromPolygons(polygons) : null,
     });
   }
   return out;
