@@ -1,13 +1,9 @@
 import { pointInAnyPreparedPolygon, prepareRoiPolygons, type RoiCoordinate, type RoiGeometry } from "./roi-geometry";
 import type { WsiPointData } from "./types";
+import { sanitizePointCount } from "./utils";
 
 export type { RoiCoordinate };
 export type RoiPolygon = RoiGeometry;
-
-function sanitizePointCount(pointData: WsiPointData): number {
-  const fillModesLength = pointData.fillModes instanceof Uint8Array ? pointData.fillModes.length : Number.MAX_SAFE_INTEGER;
-  return Math.max(0, Math.min(Math.floor(pointData.count ?? 0), Math.floor((pointData.positions?.length ?? 0) / 2), pointData.paletteIndices?.length ?? 0, fillModesLength));
-}
 
 export function filterPointDataByPolygons(pointData: WsiPointData | null | undefined, polygons: RoiPolygon[] | null | undefined): WsiPointData | null {
   if (!pointData || !pointData.count || !pointData.positions || !pointData.paletteIndices) {

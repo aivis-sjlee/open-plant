@@ -4,6 +4,7 @@ import { clamp } from "../wsi/utils";
 import type { WsiTileRenderer } from "../wsi/wsi-tile-renderer";
 import { getTopAnchorFromPolygons, measureLabelTextWidth, mergeRegionLabelStyle } from "./draw-layer-label";
 import type { DrawCoordinate, RegionLabelStyle, RegionLabelStyleResolver } from "./draw-layer-types";
+import { toDrawCoordinate } from "./draw-layer-utils";
 
 const REGION_CONTOUR_HIT_DISTANCE_PX = 6;
 
@@ -14,14 +15,6 @@ export interface PreparedRegionHit {
   polygons: PreparedRoiPolygon[];
   label: string;
   labelAnchor: DrawCoordinate | null;
-}
-
-function toDrawCoordinate(value: unknown): DrawCoordinate | null {
-  if (!Array.isArray(value) || value.length < 2) return null;
-  const x = Number(value[0]);
-  const y = Number(value[1]);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return [x, y];
 }
 
 export function resolveRegionId(region: WsiRegion, index: number): string | number {

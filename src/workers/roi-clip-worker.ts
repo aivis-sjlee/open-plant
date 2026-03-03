@@ -1,7 +1,3 @@
-import {
-  pointInAnyPreparedPolygon,
-  prepareRoiPolygons,
-} from "../wsi/roi-geometry";
 import type {
   RoiClipWorkerDataRequest,
   RoiClipWorkerIndexRequest,
@@ -10,13 +6,8 @@ import type {
   RoiClipWorkerResponse,
   RoiClipWorkerSuccess,
 } from "../wsi/point-clip-worker-protocol";
-
-function nowMs(): number {
-  if (typeof performance !== "undefined" && typeof performance.now === "function") {
-    return performance.now();
-  }
-  return Date.now();
-}
+import { pointInAnyPreparedPolygon, prepareRoiPolygons } from "../wsi/roi-geometry";
+import { nowMs } from "../wsi/utils";
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;

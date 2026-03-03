@@ -1,3 +1,4 @@
+import { closeRoiRing as closeRing, polygonSignedArea } from "./roi-geometry";
 import { clamp } from "./utils";
 
 export type BrushStrokeCoordinate = [number, number];
@@ -37,20 +38,6 @@ const DEFAULT_SMOOTHING_PASSES = 1;
 const MAX_SMOOTHING_PASSES = 4;
 const MIN_RADIUS = 1e-6;
 const ALPHA_THRESHOLD = 24;
-
-function closeRing(
-	coordinates: BrushStrokeCoordinate[],
-): BrushStrokeCoordinate[] {
-	if (!Array.isArray(coordinates) || coordinates.length < 3) return [];
-	const out = coordinates.map(([x, y]) => [x, y] as BrushStrokeCoordinate);
-	const first = out[0];
-	const last = out[out.length - 1];
-	if (!first || !last) return [];
-	if (first[0] !== last[0] || first[1] !== last[1]) {
-		out.push([first[0], first[1]]);
-	}
-	return out;
-}
 
 function sanitizePath(
 	points: BrushStrokeCoordinate[],
@@ -385,17 +372,6 @@ function toWorldRing(
 		]);
 	}
 	return closeRing(ring);
-}
-
-function polygonSignedArea(ring: BrushStrokeCoordinate[]): number {
-	if (ring.length < 4) return 0;
-	let sum = 0;
-	for (let i = 0; i < ring.length - 1; i += 1) {
-		const a = ring[i];
-		const b = ring[i + 1];
-		sum += a[0] * b[1] - b[0] * a[1];
-	}
-	return sum * 0.5;
 }
 
 function removeCollinearVertices(

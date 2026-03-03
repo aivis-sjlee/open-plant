@@ -35,6 +35,7 @@ import type {
   StampOptions,
 } from "./draw-layer";
 import { DrawLayer, resolveRegionLabelAutoLiftOffsetPx, resolveRegionLabelStyle } from "./draw-layer";
+import { toDrawCoordinate } from "./draw-layer-utils";
 import { OverviewMap, type OverviewMapOptions } from "./overview-map";
 import { type PreparedRegionHit, pickPreparedRegionAt, prepareRegionHits, resolveRegionId } from "./wsi-region-hit-utils";
 
@@ -122,14 +123,6 @@ export interface WsiCustomLayer {
 function smoothstep01(t: number): number {
   const x = clamp(t, 0, 1);
   return x * x * (3 - 2 * x);
-}
-
-function toDrawCoordinate(value: unknown): DrawCoordinate | null {
-  if (!Array.isArray(value) || value.length < 2) return null;
-  const x = Number(value[0]);
-  const y = Number(value[1]);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return [x, y];
 }
 
 export interface OverviewMapConfig {

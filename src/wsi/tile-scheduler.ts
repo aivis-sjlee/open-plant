@@ -1,3 +1,5 @@
+import { nowMs } from "./utils";
+
 export type TileBounds = [number, number, number, number];
 
 export interface ScheduledTile {
@@ -43,13 +45,6 @@ interface InflightItem {
 	tile: ScheduledTile;
 	attempt: number;
 	controller: AbortController;
-}
-
-function nowMs(): number {
-	if (typeof performance !== "undefined" && typeof performance.now === "function") {
-		return performance.now();
-	}
-	return Date.now();
 }
 
 function shouldAttachAuthHeader(url: string, authToken: string): boolean {

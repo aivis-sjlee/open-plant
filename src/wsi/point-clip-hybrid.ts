@@ -4,6 +4,7 @@ import {
   prepareRoiPolygons,
 } from "./roi-geometry";
 import type { WsiPointData } from "./types";
+import { nowMs, sanitizePointCount } from "./utils";
 import { prefilterPointsByBoundsWebGpu } from "./webgpu";
 
 export interface HybridPointClipOptions {
@@ -19,13 +20,6 @@ export interface HybridPointClipResult {
     candidateCount: number;
     bridgedToDraw?: boolean;
   };
-}
-
-function nowMs(): number {
-  if (typeof performance !== "undefined" && typeof performance.now === "function") {
-    return performance.now();
-  }
-  return Date.now();
 }
 
 export async function filterPointDataByPolygonsHybrid(
@@ -73,9 +67,7 @@ export async function filterPointDataByPolygonsHybrid(
     };
   }
 
-  const fillModesLength =
-    pointData.fillModes instanceof Uint8Array ? pointData.fillModes.length : Number.MAX_SAFE_INTEGER;
-  const safeCount = Math.max(0, Math.min(pointData.count, Math.floor(pointData.positions.length / 2), pointData.paletteIndices.length, fillModesLength));
+  const safeCount = sanitizePointCount(pointData);
   const pointFillModes = pointData.fillModes instanceof Uint8Array && pointData.fillModes.length >= safeCount ? pointData.fillModes : null;
   const pointIds = pointData.ids instanceof Uint32Array && pointData.ids.length >= safeCount ? pointData.ids : null;
   if (safeCount === 0) {

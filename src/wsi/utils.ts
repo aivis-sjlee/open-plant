@@ -1,5 +1,5 @@
 import { DEFAULT_POINT_COLOR } from "./constants";
-import type { TermPalette, WsiViewState } from "./types";
+import type { TermPalette, WsiPointData, WsiViewState } from "./types";
 
 export function clamp(value: number, min: number, max: number): number {
 	return Math.max(min, Math.min(max, value));
@@ -34,6 +34,29 @@ export function calcScaleLength(
 		return `${length.toPrecision(3)} ${unit}`;
 	}
 	return `${Math.round(length * 1000) / 1000} pixels`;
+}
+
+export function nowMs(): number {
+	if (typeof performance !== "undefined" && typeof performance.now === "function") {
+		return performance.now();
+	}
+	return Date.now();
+}
+
+export function sanitizePointCount(pointData: WsiPointData): number {
+	const fillModesLength =
+		pointData.fillModes instanceof Uint8Array
+			? pointData.fillModes.length
+			: Number.MAX_SAFE_INTEGER;
+	return Math.max(
+		0,
+		Math.min(
+			Math.floor(pointData.count ?? 0),
+			Math.floor((pointData.positions?.length ?? 0) / 2),
+			pointData.paletteIndices?.length ?? 0,
+			fillModesLength,
+		),
+	);
 }
 
 export function isSameViewState(
@@ -99,46 +122,4 @@ export function buildTermPalette(
 	}
 
 	return { colors, termToPaletteIndex };
-}
-
-export function createProgram(
-	gl: WebGL2RenderingContext,
-	vertexSource: string,
-	fragmentSource: string,
-): WebGLProgram {
-	const vs = gl.createShader(gl.VERTEX_SHADER);
-	const fs = gl.createShader(gl.FRAGMENT_SHADER);
-	if (!vs || !fs) {
-		throw new Error("Shader allocation failed");
-	}
-
-	gl.shaderSource(vs, vertexSource);
-	gl.compileShader(vs);
-	if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
-		throw new Error(gl.getShaderInfoLog(vs) || "vertex compile failed");
-	}
-
-	gl.shaderSource(fs, fragmentSource);
-	gl.compileShader(fs);
-	if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-		throw new Error(gl.getShaderInfoLog(fs) || "fragment compile failed");
-	}
-
-	const program = gl.createProgram();
-	if (!program) {
-		throw new Error("Program allocation failed");
-	}
-
-	gl.attachShader(program, vs);
-	gl.attachShader(program, fs);
-	gl.linkProgram(program);
-
-	gl.deleteShader(vs);
-	gl.deleteShader(fs);
-
-	if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-		throw new Error(gl.getProgramInfoLog(program) || "program link failed");
-	}
-
-	return program;
 }

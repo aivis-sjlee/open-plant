@@ -1,4 +1,4 @@
-import { normalizeRoiGeometry, toRoiGeometry } from "../wsi/roi-geometry";
+import { closeRoiRing, normalizeRoiGeometry, polygonSignedArea, toRoiGeometry } from "../wsi/roi-geometry";
 import { clamp } from "../wsi/utils";
 import type { DrawCoordinate, DrawOverlayCoordinates, DrawRegionCoordinates, NormalizedDrawRegionPolygon, RegionStrokeStyle } from "./draw-layer-types";
 import { CIRCLE_SIDES, DEFAULT_REGION_STROKE_STYLE, type DrawBounds, EMPTY_DASH } from "./draw-layer-types";
@@ -9,7 +9,7 @@ export function clampWorld(coord: DrawCoordinate, imageWidth: number, imageHeigh
   return [clamp(coord[0], 0, imageWidth), clamp(coord[1], 0, imageHeight)];
 }
 
-export function toCoord(value: DrawCoordinate | number[]): DrawCoordinate | null {
+export function toDrawCoordinate(value: unknown): DrawCoordinate | null {
   if (!Array.isArray(value) || value.length < 2) return null;
   const x = Number(value[0]);
   const y = Number(value[1]);
@@ -17,32 +17,14 @@ export function toCoord(value: DrawCoordinate | number[]): DrawCoordinate | null
   return [x, y];
 }
 
+export const toCoord = toDrawCoordinate;
+
 export function closeRing(coords: DrawCoordinate[]): DrawCoordinate[] {
-  if (!Array.isArray(coords) || coords.length < 3) return [];
-
-  const out = coords.map(([x, y]) => [x, y] as DrawCoordinate);
-  const first = out[0];
-  const last = out[out.length - 1];
-  if (!first || !last) return [];
-
-  if (first[0] !== last[0] || first[1] !== last[1]) {
-    out.push([first[0], first[1]]);
-  }
-
-  return out;
+  return closeRoiRing(coords) as DrawCoordinate[];
 }
 
 export function polygonArea(coords: DrawCoordinate[]): number {
-  if (!Array.isArray(coords) || coords.length < 4) return 0;
-
-  let sum = 0;
-  for (let i = 0; i < coords.length - 1; i += 1) {
-    const a = coords[i];
-    const b = coords[i + 1];
-    sum += a[0] * b[1] - b[0] * a[1];
-  }
-
-  return Math.abs(sum * 0.5);
+  return Math.abs(polygonSignedArea(closeRing(coords)));
 }
 
 export function computeBounds(coords: DrawCoordinate[]): DrawBounds {
