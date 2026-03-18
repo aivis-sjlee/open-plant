@@ -71,11 +71,6 @@ export class WsiTileRenderer {
   private pointProgram: PointProgram;
   private readonly tileScheduler: TileScheduler;
 
-  private zoomStack: { cnt: number; direction: "in" | "out" | null } = {
-    cnt: 0,
-    direction: null,
-  };
-
   private authToken: string;
   private destroyed = false;
   private contextLost = false;
@@ -122,7 +117,7 @@ export class WsiTileRenderer {
   private cache = new Map<string, CachedTile>();
   private zoomSnaps: number[] = [];
   private zoomSnapFitAsMin = false;
-  private zoomSnapState: ZoomSnapState = { accumulatedDelta: 0, lastSnapTimeMs: 0 };
+  private zoomSnapState: ZoomSnapState = { accumulatedDelta: 0, lastSnapTimeMs: 0, blockedDirection: null };
 
   private readonly boundPointerDown: (event: PointerEvent) => void;
   private readonly boundPointerMove: (event: PointerEvent) => void;
@@ -503,31 +498,14 @@ export class WsiTileRenderer {
     };
   }
 
-  private handleSnapZoom(direction: "in" | "out", screenX: number, screenY: number): void {
+  private handleSnapZoom(direction: "in" | "out", screenX: number, screenY: number): boolean {
     const ongoing = this.viewAnimationState.animation;
     const baseZoom = ongoing ? ongoing.to.zoom : this.camera.getViewState().zoom;
-
     const validSnaps = this.zoomSnaps.filter(z => z >= this.minZoom && z <= this.maxZoom);
-
-    const zoomStack = this.zoomStack;
-
-    if (zoomStack.cnt > 0 && validSnaps.length - 1 === zoomStack.cnt && zoomStack.direction === direction) {
-      return;
-    }
-
-    if (zoomStack.direction !== direction) {
-      zoomStack.cnt = 0;
-      zoomStack.direction = null;
-    }
-
-    if (!ongoing) {
-      zoomStack.cnt = 0;
-    }
-
-    zoomStack.cnt += 1;
-
     const result = resolveSnapTarget(validSnaps, baseZoom, direction, this.zoomSnapFitAsMin);
-    if (!result) return;
+    if (!result) return false;
+
+    let targetZoom: number;
 
     if (result.type === "fit") {
       const rect = this.canvas.getBoundingClientRect();
@@ -536,11 +514,25 @@ export class WsiTileRenderer {
       const fitTarget = computeFitToImageTarget(this.source, vw, vh, this.minZoom, this.maxZoom);
       this.fitZoom = fitTarget.fitZoom;
       this.applyZoomBounds();
-      startZoomPivotAnimation(this.getZoomPivotAnimationContext(), fitTarget.target.zoom, screenX, screenY, SNAP_ZOOM_DURATION_MS);
-      return;
+      targetZoom = fitTarget.target.zoom;
+    } else {
+      targetZoom = result.zoom;
     }
 
-    startZoomPivotAnimation(this.getZoomPivotAnimationContext(), result.zoom, screenX, screenY, SNAP_ZOOM_DURATION_MS);
+    const epsilon = Math.max(Math.abs(targetZoom) * 0.005, 1e-8);
+
+    if (ongoing) {
+      const ongoingDirection: "in" | "out" | null =
+        ongoing.to.zoom > ongoing.from.zoom + epsilon ? "in" : ongoing.to.zoom < ongoing.from.zoom - epsilon ? "out" : null;
+      if (ongoingDirection === direction && Math.abs(ongoing.to.zoom - targetZoom) <= epsilon) {
+        return false;
+      }
+    } else if (Math.abs(baseZoom - targetZoom) <= epsilon) {
+      return false;
+    }
+
+    startZoomPivotAnimation(this.getZoomPivotAnimationContext(), targetZoom, screenX, screenY, SNAP_ZOOM_DURATION_MS);
+    return true;
   }
 
   render(): void {

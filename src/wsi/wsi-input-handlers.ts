@@ -130,7 +130,7 @@ export interface CreateRendererInputHandlersOptions {
   requestRender: () => void;
   zoomBy: (factor: number, x: number, y: number) => void;
   getUseZoomSnaps?: () => boolean;
-  onSnapZoom?: (direction: "in" | "out", x: number, y: number) => void;
+  onSnapZoom?: (direction: "in" | "out", x: number, y: number) => boolean;
   zoomSnapState?: ZoomSnapState;
 }
 

@@ -144,7 +144,7 @@ interface WheelSnapOptions {
   event: WheelEvent;
   canvas: HTMLCanvasElement;
   snapState: ZoomSnapState;
-  onSnapZoom: (direction: "in" | "out", x: number, y: number) => void;
+  onSnapZoom: (direction: "in" | "out", x: number, y: number) => boolean;
 }
 
 const SNAP_DELTA_THRESHOLD = 4;
@@ -152,6 +152,16 @@ const SNAP_DELTA_THRESHOLD = 4;
 export function handleWheelSnap(options: WheelSnapOptions): void {
   const { event, canvas, snapState, onSnapZoom } = options;
   event.preventDefault();
+
+  const inputDirection: "in" | "out" | null = event.deltaY < 0 ? "in" : event.deltaY > 0 ? "out" : null;
+  if (inputDirection && snapState.blockedDirection) {
+    if (inputDirection !== snapState.blockedDirection) {
+      snapState.blockedDirection = null;
+      snapState.accumulatedDelta = 0;
+    } else {
+      return;
+    }
+  }
 
   if (snapState.accumulatedDelta !== 0 && event.deltaY !== 0 && Math.sign(snapState.accumulatedDelta) !== Math.sign(event.deltaY)) {
     snapState.accumulatedDelta = 0;
@@ -166,7 +176,12 @@ export function handleWheelSnap(options: WheelSnapOptions): void {
   const direction: "in" | "out" = snapState.accumulatedDelta > 0 ? "out" : "in";
 
   snapState.accumulatedDelta = 0;
-  onSnapZoom(direction, x, y);
+  if (!onSnapZoom(direction, x, y)) {
+    snapState.blockedDirection = direction;
+    return;
+  }
+
+  snapState.blockedDirection = null;
 }
 
 export function handleDoubleClick(options: DoubleClickOptions): void {

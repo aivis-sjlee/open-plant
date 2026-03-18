@@ -113,6 +113,7 @@ export interface InteractionState {
 export interface ZoomSnapState {
   accumulatedDelta: number;
   lastSnapTimeMs: number;
+  blockedDirection: "in" | "out" | null;
 }
 
 export interface InteractionConfig {
