@@ -517,7 +517,11 @@ export class WsiTileRenderer {
 
     if (zoomStack.direction !== direction) {
       zoomStack.cnt = 0;
-      zoomStack.direction = direction;
+      zoomStack.direction = null;
+    }
+
+    if (!ongoing) {
+      zoomStack.cnt = 0;
     }
 
     zoomStack.cnt += 1;
