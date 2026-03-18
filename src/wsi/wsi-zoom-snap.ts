@@ -16,17 +16,9 @@ export function normalizeZoomSnaps(magnifications: number[] | null | undefined, 
     .sort((a, b) => a - b);
 }
 
-export type SnapZoomResult =
-  | { type: "snap"; zoom: number }
-  | { type: "fit" }
-  | null;
+export type SnapZoomResult = { type: "snap"; zoom: number } | { type: "fit" } | null;
 
-export function resolveSnapTarget(
-  validSnaps: number[],
-  currentZoom: number,
-  direction: "in" | "out",
-  fitAsMin: boolean,
-): SnapZoomResult {
+export function resolveSnapTarget(validSnaps: number[], currentZoom: number, direction: "in" | "out", fitAsMin: boolean): SnapZoomResult {
   if (validSnaps.length === 0) return null;
 
   const epsilon = Math.max(currentZoom * 0.005, 1e-8);
@@ -64,13 +56,7 @@ export interface ZoomPivotAnimationContext {
   requestRender: () => void;
 }
 
-export function startZoomPivotAnimation(
-  ctx: ZoomPivotAnimationContext,
-  targetZoom: number,
-  pivotScreenX: number,
-  pivotScreenY: number,
-  durationMs: number,
-): void {
+export function startZoomPivotAnimation(ctx: ZoomPivotAnimationContext, targetZoom: number, pivotScreenX: number, pivotScreenY: number, durationMs: number): void {
   const fromState = ctx.camera.getViewState();
   const [pivotWorldX, pivotWorldY] = ctx.camera.screenToWorld(pivotScreenX, pivotScreenY);
   const vp = ctx.camera.getViewportSize();

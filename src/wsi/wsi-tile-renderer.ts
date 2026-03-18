@@ -71,6 +71,11 @@ export class WsiTileRenderer {
   private pointProgram: PointProgram;
   private readonly tileScheduler: TileScheduler;
 
+  private zoomStack: { cnt: number; direction: "in" | "out" | null } = {
+    cnt: 0,
+    direction: null,
+  };
+
   private authToken: string;
   private destroyed = false;
   private contextLost = false;
@@ -499,8 +504,25 @@ export class WsiTileRenderer {
   }
 
   private handleSnapZoom(direction: "in" | "out", screenX: number, screenY: number): void {
+    const ongoing = this.viewAnimationState.animation;
+    const baseZoom = ongoing ? ongoing.to.zoom : this.camera.getViewState().zoom;
+
     const validSnaps = this.zoomSnaps.filter(z => z >= this.minZoom && z <= this.maxZoom);
-    const result = resolveSnapTarget(validSnaps, this.camera.getViewState().zoom, direction, this.zoomSnapFitAsMin);
+
+    const zoomStack = this.zoomStack;
+
+    if (zoomStack.cnt > 0 && validSnaps.length - 1 === zoomStack.cnt && zoomStack.direction === direction) {
+      return;
+    }
+
+    if (zoomStack.direction !== direction) {
+      zoomStack.cnt = 0;
+      zoomStack.direction = direction;
+    }
+
+    zoomStack.cnt += 1;
+
+    const result = resolveSnapTarget(validSnaps, baseZoom, direction, this.zoomSnapFitAsMin);
     if (!result) return;
 
     if (result.type === "fit") {

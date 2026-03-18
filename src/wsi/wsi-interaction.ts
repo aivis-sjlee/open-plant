@@ -148,17 +148,10 @@ interface WheelSnapOptions {
 }
 
 const SNAP_DELTA_THRESHOLD = 4;
-const SNAP_COOLDOWN_MS = 300;
 
 export function handleWheelSnap(options: WheelSnapOptions): void {
   const { event, canvas, snapState, onSnapZoom } = options;
   event.preventDefault();
-
-  const now = performance.now();
-  if (now - snapState.lastSnapTimeMs < SNAP_COOLDOWN_MS) {
-    snapState.accumulatedDelta = 0;
-    return;
-  }
 
   if (snapState.accumulatedDelta !== 0 && event.deltaY !== 0 && Math.sign(snapState.accumulatedDelta) !== Math.sign(event.deltaY)) {
     snapState.accumulatedDelta = 0;
@@ -173,7 +166,6 @@ export function handleWheelSnap(options: WheelSnapOptions): void {
   const direction: "in" | "out" = snapState.accumulatedDelta > 0 ? "out" : "in";
 
   snapState.accumulatedDelta = 0;
-  snapState.lastSnapTimeMs = now;
   onSnapZoom(direction, x, y);
 }
 
