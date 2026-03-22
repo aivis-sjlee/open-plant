@@ -1,7 +1,7 @@
 {
   "name": "open-plant",
   "description": "WebGL2-based high-performance WSI viewer rendering engine for React",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "license": "MIT",
   "author": "Open Plant",
   "repository": {
