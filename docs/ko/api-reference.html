@@ -131,14 +131,16 @@
                 <tr><td><code>data</code></td><td><code>HeatmapPointData | null</code></td><td>typed hotspot 입력. 형태: <code>{ count, positions, weights? }</code>.</td></tr>
                 <tr><td><code>visible</code></td><td><code>boolean</code></td><td>독립 show/hide 토글. 기본값 <code>true</code>.</td></tr>
                 <tr><td><code>opacity</code></td><td><code>number</code></td><td>레이어 불투명도 <code>0..1</code>. 기본값 <code>0.9</code>.</td></tr>
-                <tr><td><code>radius</code></td><td><code>number</code></td><td>커널 core 반경(CSS px). 기본값 <code>4</code>.</td></tr>
+                <tr><td><code>radius</code></td><td><code>number</code></td><td>커널 core 반경(CSS px). 기본값 <code>3</code>.</td></tr>
                 <tr><td><code>blur</code></td><td><code>number</code></td><td>커널 blur 크기(CSS px). 기본값 <code>2</code>.</td></tr>
                 <tr><td><code>gradient</code></td><td><code>readonly string[]</code></td><td>colorization에 쓰는 색상 stop 배열.</td></tr>
                 <tr><td><code>backgroundColor</code></td><td><code>string | null</code></td><td>선택적 배경 fill. 기본값 <code>null</code>.</td></tr>
                 <tr><td><code>scaleMode</code></td><td><code>"screen" | "fixed-zoom"</code></td><td><code>screen</code>은 현재 화면 기준으로 heatmap state를 계산하고, <code>fixed-zoom</code>은 선택한 continuous zoom 기준으로 외형을 잠급니다.</td></tr>
                 <tr><td><code>fixedZoom</code></td><td><code>number</code></td><td><code>fixed-zoom</code> 모드의 continuous zoom 기준값 (<code>source.maxTierZoom + log2(viewState.zoom)</code>).</td></tr>
+                <tr><td><code>zoomThreshold</code></td><td><code>number</code></td><td>heatmap이 반응하는 유효 줌을 뒤로 미루는 continuous zoom offset. 값이 클수록 더 높은 실제 줌까지 heatmap이 크게 유지됩니다.</td></tr>
+                <tr><td><code>densityContrast</code></td><td><code>number</code></td><td>sparse 영역은 더 눌러두고 dense 영역은 더 빨리 강조하는 대비 계수입니다.</td></tr>
                 <tr><td><code>clipToRegions</code></td><td><code>WsiRegion[]</code></td><td>선택적 ROI point filter + overlay mask.</td></tr>
-                <tr><td><code>maxRenderedPoints</code></td><td><code>number</code></td><td>visible bin budget. 기본값 <code>24000</code>.</td></tr>
+                <tr><td><code>maxRenderedPoints</code></td><td><code>number</code></td><td>visible bin budget. 기본값 <code>48000</code>.</td></tr>
                 <tr><td><code>zIndex</code></td><td><code>number</code></td><td>오버레이 draw priority. 기본값 <code>5</code>.</td></tr>
                 <tr><td><code>onStats</code></td><td><code>(stats) =&gt; void</code></td><td>point count, visible count, render time 콜백.</td></tr>
               </tbody>

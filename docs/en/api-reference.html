@@ -128,14 +128,16 @@
                 <tr><td><code>data</code></td><td><code>HeatmapPointData | null</code></td><td>Typed hotspot input: <code>{ count, positions, weights? }</code>.</td></tr>
                 <tr><td><code>visible</code></td><td><code>boolean</code></td><td>Independent show/hide toggle. Default: <code>true</code>.</td></tr>
                 <tr><td><code>opacity</code></td><td><code>number</code></td><td>Layer opacity <code>0..1</code>. Default: <code>0.9</code>.</td></tr>
-                <tr><td><code>radius</code></td><td><code>number</code></td><td>Kernel core radius in CSS pixels. Default: <code>4</code>.</td></tr>
+                <tr><td><code>radius</code></td><td><code>number</code></td><td>Kernel core radius in CSS pixels. Default: <code>3</code>.</td></tr>
                 <tr><td><code>blur</code></td><td><code>number</code></td><td>Kernel blur size in CSS pixels. Default: <code>2</code>.</td></tr>
                 <tr><td><code>gradient</code></td><td><code>readonly string[]</code></td><td>Color stop list used during colorization.</td></tr>
                 <tr><td><code>backgroundColor</code></td><td><code>string | null</code></td><td>Optional backdrop fill. Default: <code>null</code>.</td></tr>
                 <tr><td><code>scaleMode</code></td><td><code>"screen" | "fixed-zoom"</code></td><td><code>screen</code> adapts heatmap state to the current viewport; <code>fixed-zoom</code> locks appearance to a chosen continuous zoom.</td></tr>
                 <tr><td><code>fixedZoom</code></td><td><code>number</code></td><td>Continuous zoom reference used by <code>fixed-zoom</code> mode (<code>source.maxTierZoom + log2(viewState.zoom)</code>).</td></tr>
+                <tr><td><code>zoomThreshold</code></td><td><code>number</code></td><td>Continuous zoom offset applied to heatmap detail response. Higher values keep the heatmap visually larger until higher real viewer zoom levels.</td></tr>
+                <tr><td><code>densityContrast</code></td><td><code>number</code></td><td>Contrast factor that suppresses sparse regions more aggressively while pushing dense regions toward highlight colors faster.</td></tr>
                 <tr><td><code>clipToRegions</code></td><td><code>WsiRegion[]</code></td><td>Optional ROI point filter + overlay mask.</td></tr>
-                <tr><td><code>maxRenderedPoints</code></td><td><code>number</code></td><td>Visible-bin budget. Default: <code>24000</code>.</td></tr>
+                <tr><td><code>maxRenderedPoints</code></td><td><code>number</code></td><td>Visible-bin budget. Default: <code>48000</code>.</td></tr>
                 <tr><td><code>zIndex</code></td><td><code>number</code></td><td>Overlay draw priority. Default: <code>5</code>.</td></tr>
                 <tr><td><code>onStats</code></td><td><code>(stats) =&gt; void</code></td><td>Render stats callback: point count, visible count, render time.</td></tr>
               </tbody>

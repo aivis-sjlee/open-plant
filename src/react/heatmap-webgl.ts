@@ -47,6 +47,9 @@ uniform sampler2D uGradientTexture;
 uniform float uOpacity;
 uniform float uCutoff;
 uniform float uGain;
+uniform float uGamma;
+uniform float uBias;
+uniform float uStretch;
 uniform vec2 uResolution;
 out vec4 outColor;
 void main() {
@@ -57,9 +60,18 @@ void main() {
   float density = texture(uAccumTexture, accumUv).a;
   if (density <= uCutoff) discard;
 
-  float normalized = clamp((density - uCutoff) / max(0.0001, 1.0 - uCutoff), 0.0, 1.0);
-  float boosted = 1.0 - exp(-normalized * uGain);
-  float gradientT = pow(boosted, 0.9);
+  float boosted = 1.0 - exp(-max(0.0, density - uCutoff) * uGain);
+  float contrast = clamp(uGamma, 0.35, 6.0);
+  float bias = clamp(uBias, 0.0, 0.92);
+  float biased = max(0.0, boosted - bias);
+  float stretched = pow(
+    biased / max(1e-5, 1.0 - bias),
+    1.0 / clamp(uStretch, 1.0, 4.0)
+  );
+  float normalized = pow(stretched, 1.0 / contrast);
+  float shoulder = 1.0 - pow(max(0.0, 1.0 - normalized), 1.0 + max(0.0, contrast - 1.0));
+  float shoulderBlend = clamp((contrast - 1.0) * 0.32, 0.0, 0.78);
+  float gradientT = mix(normalized, shoulder, shoulderBlend);
   vec4 gradientColor = texture(uGradientTexture, vec2(gradientT, 0.5));
   float alpha = gradientColor.a * clamp(uOpacity, 0.0, 1.0);
   if (alpha <= 0.0001) discard;
@@ -79,6 +91,9 @@ export interface HeatmapWebGLRenderParams {
   opacity: number;
   cutoff?: number;
   gain?: number;
+  gamma?: number;
+  bias?: number;
+  stretch?: number;
 }
 
 export class HeatmapWebGLRenderer {
@@ -104,6 +119,12 @@ export class HeatmapWebGLRenderer {
 
   private readonly framebuffer: WebGLFramebuffer;
 
+  private readonly accumInternalFormat: number;
+
+  private readonly accumTextureFormat: number;
+
+  private readonly accumTextureType: number;
+
   private readonly uAccumResolution: WebGLUniformLocation;
 
   private readonly uAccumPointSize: WebGLUniformLocation;
@@ -123,6 +144,12 @@ export class HeatmapWebGLRenderer {
   private readonly uColorGain: WebGLUniformLocation;
 
   private readonly uColorResolution: WebGLUniformLocation;
+
+  private readonly uColorGamma: WebGLUniformLocation;
+
+  private readonly uColorBias: WebGLUniformLocation;
+
+  private readonly uColorStretch: WebGLUniformLocation;
 
   private pointCapacity = 0;
 
@@ -147,6 +174,12 @@ export class HeatmapWebGLRenderer {
       throw new Error("WebGL2 is not available for heatmap rendering.");
     }
     this.gl = gl;
+
+    const colorBufferFloat = gl.getExtension("EXT_color_buffer_float");
+    const supportsFloatAccum = Boolean(colorBufferFloat);
+    this.accumInternalFormat = supportsFloatAccum ? gl.RGBA16F : gl.RGBA8;
+    this.accumTextureFormat = gl.RGBA;
+    this.accumTextureType = supportsFloatAccum ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
 
     this.accumProgram = createProgram(gl, ACCUM_VERTEX_SHADER, ACCUM_FRAGMENT_SHADER);
     this.colorProgram = createProgram(gl, COLOR_VERTEX_SHADER, COLOR_FRAGMENT_SHADER);
@@ -178,8 +211,11 @@ export class HeatmapWebGLRenderer {
     const colorOpacity = gl.getUniformLocation(this.colorProgram, "uOpacity");
     const colorCutoff = gl.getUniformLocation(this.colorProgram, "uCutoff");
     const colorGain = gl.getUniformLocation(this.colorProgram, "uGain");
+    const colorGamma = gl.getUniformLocation(this.colorProgram, "uGamma");
+    const colorBias = gl.getUniformLocation(this.colorProgram, "uBias");
+    const colorStretch = gl.getUniformLocation(this.colorProgram, "uStretch");
     const colorResolution = gl.getUniformLocation(this.colorProgram, "uResolution");
-    if (!accumResolution || !accumPointSize || !accumCoreRatio || !accumPointAlpha || !colorAccumTexture || !colorGradientTexture || !colorOpacity || !colorCutoff || !colorGain || !colorResolution) {
+    if (!accumResolution || !accumPointSize || !accumCoreRatio || !accumPointAlpha || !colorAccumTexture || !colorGradientTexture || !colorOpacity || !colorCutoff || !colorGain || !colorGamma || !colorBias || !colorStretch || !colorResolution) {
       throw new Error("Failed to resolve heatmap WebGL uniforms.");
     }
     this.uAccumResolution = accumResolution;
@@ -191,6 +227,9 @@ export class HeatmapWebGLRenderer {
     this.uColorOpacity = colorOpacity;
     this.uColorCutoff = colorCutoff;
     this.uColorGain = colorGain;
+    this.uColorGamma = colorGamma;
+    this.uColorBias = colorBias;
+    this.uColorStretch = colorStretch;
     this.uColorResolution = colorResolution;
 
     gl.bindVertexArray(this.accumVao);
@@ -288,8 +327,11 @@ export class HeatmapWebGLRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.gradientTexture);
     gl.uniform1i(this.uColorGradientTexture, 1);
     gl.uniform1f(this.uColorOpacity, params.opacity);
-    gl.uniform1f(this.uColorCutoff, params.cutoff ?? 0.04);
-    gl.uniform1f(this.uColorGain, params.gain ?? 3.6);
+    gl.uniform1f(this.uColorCutoff, params.cutoff ?? 0.008);
+    gl.uniform1f(this.uColorGain, params.gain ?? 2.6);
+    gl.uniform1f(this.uColorGamma, params.gamma ?? 1.0);
+    gl.uniform1f(this.uColorBias, params.bias ?? 0);
+    gl.uniform1f(this.uColorStretch, params.stretch ?? 1);
     gl.uniform2f(this.uColorResolution, params.width, params.height);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
@@ -326,7 +368,17 @@ export class HeatmapWebGLRenderer {
 
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.accumTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, safeWidth, safeHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      this.accumInternalFormat,
+      safeWidth,
+      safeHeight,
+      0,
+      this.accumTextureFormat,
+      this.accumTextureType,
+      null,
+    );
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.accumTexture, 0);
     const framebufferStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);

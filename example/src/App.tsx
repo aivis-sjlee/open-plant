@@ -157,6 +157,7 @@ export default function App() {
   const [showHeatmap, setShowHeatmap] = useState(true);
   const [heatmapFixedZoom, setHeatmapFixedZoom] = useState<number | undefined>(undefined);
   const [heatmapScaleMode, setHeatmapScaleMode] = useState<"screen" | "fixed-zoom">("fixed-zoom");
+  const [heatmapDensityContrast, setHeatmapDensityContrast] = useState(3);
   const heatmapInitSourceRef = useRef<string>("");
 
   const resetPointSizeStops = useCallback(() => {
@@ -512,13 +513,14 @@ export default function App() {
               <HeatmapLayer
                 data={positiveHeatmapData}
                 visible={showHeatmap}
-                opacity={0.62}
-                radius={1}
-                blur={2}
-                gradient={["#00000000", "#3876FF", "#4CDDDD", "#FFE75C", "#FF8434", "#FF3434"]}
+                opacity={0.7}
+                radius={0.5}
+                blur={3}
+                gradient={["transparent", "#0ff", "#0f0", "#ff0", "#f00"]}
                 scaleMode={heatmapMode}
                 fixedZoom={heatmapFixedZoom}
-                maxRenderedPoints={28_000}
+                densityContrast={heatmapDensityContrast}
+                maxRenderedPoints={100_000}
               />
               <RegionLayer
                 regions={draw.roiRegions}
@@ -599,11 +601,25 @@ export default function App() {
               >
                 현재 줌으로 잠금
               </button>
+              <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+                <span>density contrast: {heatmapDensityContrast.toFixed(2)}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={16}
+                  step={0.25}
+                  value={heatmapDensityContrast}
+                  onChange={event => setHeatmapDensityContrast(Number(event.target.value))}
+                  disabled={!positiveHeatmapData}
+                />
+              </label>
               <div style={{ fontSize: 11, opacity: 0.82, lineHeight: 1.35 }}>
                 positive heatmap pts: {positiveHeatmapData?.count ?? 0}
                 <br />
                 mode: {heatmapMode}
                 {heatmapScaleMode === "fixed-zoom" && heatmapFixedZoom !== undefined ? ` @ z${heatmapFixedZoom.toFixed(2)}` : ""}
+                <br />
+                contrast: {heatmapDensityContrast.toFixed(2)}
               </div>
             </div>
           </>

@@ -35,6 +35,8 @@ export interface HeatmapLayerProps {
   backgroundColor?: string | null;
   scaleMode?: HeatmapKernelScaleMode;
   fixedZoom?: number;
+  zoomThreshold?: number;
+  densityContrast?: number;
   clipToRegions?: readonly WsiRegion[];
   zIndex?: number;
   maxRenderedPoints?: number;
@@ -48,6 +50,8 @@ interface HeatmapCell {
   maxY: number;
   worldX: number;
   worldY: number;
+  renderWorldX: number;
+  renderWorldY: number;
   weight: number;
   count: number;
 }
@@ -56,6 +60,7 @@ interface HeatmapLevel {
   cellWorldSize: number;
   bins: HeatmapCell[];
   index: SpatialIndex<number>;
+  normalizationUpperWeight: number;
 }
 
 interface HeatmapSourceData {
@@ -70,6 +75,7 @@ interface HeatmapSourceData {
   xs: Float32Array;
   ys: Float32Array;
   ws: Float32Array;
+  pointIndex: SpatialIndex<number>;
   cellSizes: number[];
   levels: Array<HeatmapLevel | null>;
 }
@@ -84,17 +90,22 @@ interface HeatmapFixedState {
   referenceZoom: number;
   referenceRawZoom: number;
   heatmapScale: number;
-  levelIndex: number;
-  kernelRadiusPx: number;
-  blurRadiusPx: number;
+  kernelWorldRadius: number;
+  blurWorldRadius: number;
+  sampleProbability: number;
+  sampleStride: number;
   pointAlpha: number;
-  normalizationMaxWeight: number;
 }
 
 interface HeatmapRuntime {
   sourceData: HeatmapSourceData | null;
   fixedState: HeatmapFixedState | null;
   screenLevelIndex: number;
+  screenSecondaryLevelIndex: number;
+  screenSecondaryLevelWeight: number;
+  screenPointAlpha: number;
+  screenNormalizationMaxWeight: number;
+  screenVisibilityStrength: number;
   webgl: HeatmapWebGLRenderer | null | undefined;
   webglWarningIssued: boolean;
   webglPositions: Float32Array | null;
@@ -112,6 +123,8 @@ interface DrawState {
   backgroundColor: string | null;
   scaleMode: HeatmapKernelScaleMode;
   fixedZoom?: number;
+  zoomThreshold: number;
+  densityContrast: number;
   clipPolygons: readonly PreparedRoiPolygon[];
   clipKey: string;
   maxRenderedPoints: number;
@@ -133,17 +146,22 @@ interface ViewportFrame {
 
 const HEATMAP_DRAW_ID = "__open_plant_heatmap_layer__";
 const DEFAULT_GRADIENT = ["#00000000", "#3876FF", "#4CDDDD", "#FFE75C", "#FF8434", "#FF3434"] as const;
-const DEFAULT_RADIUS = 4;
+const DEFAULT_RADIUS = 3;
 const DEFAULT_BLUR = 2;
 const DEFAULT_OPACITY = 0.9;
-const DEFAULT_MAX_RENDERED_POINTS = 24000;
+const DEFAULT_MAX_RENDERED_POINTS = 52000;
 const DEFAULT_SCALE_MODE: HeatmapKernelScaleMode = "screen";
+const DEFAULT_DENSITY_CONTRAST = 2.2;
 const MIN_RASTER_SIZE = 128;
-const MAX_RASTER_SIZE = 640;
-const BASE_RADIUS_UNIT_PX = 3.5;
-const BASE_BLUR_UNIT_PX = 5;
+const MAX_RASTER_SIZE = 1600;
+const BASE_RADIUS_UNIT_PX = 1.9;
+const BASE_BLUR_UNIT_PX = 4.2;
 const MIN_VISIBLE_BUDGET = 3000;
 const PYRAMID_SCALE_STEP = Math.SQRT2;
+const NORMALIZATION_SAMPLE_SIZE = 2048;
+const NORMALIZATION_PERCENTILE = 0.9;
+const MAX_DENSITY_CONTRAST = 16;
+const MAX_ZOOM_THRESHOLD = 8;
 
 function resolveContinuousZoom(rawZoom: number, source: WsiImageSource): number {
   return source.maxTierZoom + Math.log2(Math.max(1e-6, rawZoom));
@@ -153,16 +171,154 @@ function resolveRawZoomFromContinuousZoom(continuousZoom: number, source: WsiIma
   return Math.max(1e-6, 2 ** (continuousZoom - source.maxTierZoom));
 }
 
-function resolveLowResScale(width: number, height: number, totalPointCount: number): number {
+function applyZoomThreshold(rawZoom: number, source: WsiImageSource, zoomThreshold: number): number {
+  if (!Number.isFinite(zoomThreshold) || Math.abs(zoomThreshold) < 1e-6) {
+    return Math.max(1e-6, rawZoom);
+  }
+  const shiftedZoom = resolveContinuousZoom(rawZoom, source) - zoomThreshold;
+  return resolveRawZoomFromContinuousZoom(shiftedZoom, source);
+}
+
+function resolveThresholdLevelBias(zoomThreshold: number): number {
+  if (!Number.isFinite(zoomThreshold) || Math.abs(zoomThreshold) < 1e-6) {
+    return 0;
+  }
+  return Math.round((zoomThreshold * 1.5) / Math.max(1e-6, Math.log2(PYRAMID_SCALE_STEP)));
+}
+
+function resolveDensityWeightExponent(densityContrast: number): number {
+  const contrast = clamp(densityContrast, 0, MAX_DENSITY_CONTRAST);
+  return clamp(0.55 + Math.sqrt(Math.max(0, contrast)) * 0.48, 0.55, 6);
+}
+
+function resolveCellSupportFactor(cellCount: number): number {
+  const count = Math.max(0, cellCount);
+  if (count <= 1) return 0.18;
+  if (count <= 2) return 0.3;
+  if (count <= 4) return 0.48;
+  if (count <= 8) return 0.7;
+  if (count <= 16) return 0.86;
+  return 1;
+}
+
+function resolveDensityCutoff(densityContrast: number): number {
+  const contrast = clamp(densityContrast, 0, MAX_DENSITY_CONTRAST);
+  const t = contrast / MAX_DENSITY_CONTRAST;
+  return 0.022 - t * 0.015;
+}
+
+function resolveDensityGain(densityContrast: number): number {
+  const contrast = clamp(densityContrast, 0, MAX_DENSITY_CONTRAST);
+  return 0.18 + Math.pow(Math.max(0, contrast), 0.72) * 0.42 + Math.log2(contrast + 1) * 0.24;
+}
+
+function resolveDensityGamma(densityContrast: number): number {
+  return resolveDensityWeightExponent(densityContrast);
+}
+
+function resolveDensityBias(densityContrast: number): number {
+  const contrast = clamp(densityContrast, 0, MAX_DENSITY_CONTRAST);
+  const t = contrast / MAX_DENSITY_CONTRAST;
+  return clamp(0.46 - t * 0.34, 0.12, 0.46);
+}
+
+function resolveDensityStretch(densityContrast: number, rawZoom: number, source: WsiImageSource): number {
+  const contrast = clamp(densityContrast, 0, MAX_DENSITY_CONTRAST);
+  const contrastT = contrast / MAX_DENSITY_CONTRAST;
+  const continuousZoom = resolveContinuousZoom(rawZoom, source);
+  const zoomStart = source.maxTierZoom - 3.2;
+  const zoomEnd = source.maxTierZoom - 1.15;
+  const zoomT = clamp((continuousZoom - zoomStart) / Math.max(1e-6, zoomEnd - zoomStart), 0, 1);
+  const baseStretch = 1.12 + Math.pow(contrastT, 0.82) * 1.18;
+  const zoomStretch = 1 + zoomT * (0.48 + contrastT * 0.92);
+  return baseStretch * zoomStretch;
+}
+
+function resolveNormalizedDensityWeight(weight: number, normalizationMaxWeight: number, densityContrast: number): number {
+  void densityContrast;
+  const safeWeight = Math.max(0, weight);
+  const safeMaxWeight = Math.max(1e-6, normalizationMaxWeight);
+  const normalized = Math.log1p(safeWeight) / Math.log1p(safeMaxWeight);
+  return clamp(normalized, 0, 1);
+}
+
+function resolveNormalizationPercentile(densityContrast: number): number {
+  void densityContrast;
+  return NORMALIZATION_PERCENTILE;
+}
+
+function resolveNormalizationUpperWeight(cells: readonly HeatmapCell[], densityContrast: number): number {
+  if (cells.length === 0) return 1;
+
+  const sampleCount = Math.min(cells.length, NORMALIZATION_SAMPLE_SIZE);
+  const sampledWeights = new Array<number>(sampleCount);
+  let maxWeight = 1;
+
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const cellIndex = Math.min(
+      cells.length - 1,
+      Math.floor(((sampleIndex + 0.5) * cells.length) / sampleCount),
+    );
+    const weight = Math.max(0, cells[cellIndex]?.weight ?? 0);
+    sampledWeights[sampleIndex] = weight;
+    if (weight > maxWeight) maxWeight = weight;
+  }
+
+  for (let cellIndex = 0; cellIndex < cells.length; cellIndex += 1) {
+    const weight = Math.max(0, cells[cellIndex]?.weight ?? 0);
+    if (weight > maxWeight) maxWeight = weight;
+  }
+
+  sampledWeights.sort((left, right) => left - right);
+  const percentile = resolveNormalizationPercentile(densityContrast);
+  const percentileIndex = Math.max(0, Math.min(
+    sampledWeights.length - 1,
+    Math.floor((sampledWeights.length - 1) * percentile),
+  ));
+  const percentileWeight = sampledWeights[percentileIndex] ?? maxWeight;
+  const floorRatio = 0.14;
+  const uplift = 1.08;
+  return Math.max(1, Math.min(maxWeight, Math.max(percentileWeight * uplift, maxWeight * floorRatio)));
+}
+
+function resolveZoomVisibilityStrength(rawZoom: number, source: WsiImageSource, zoomThreshold: number): number {
+  void zoomThreshold;
+  const continuousZoom = resolveContinuousZoom(rawZoom, source);
+  const fadeStart = source.maxTierZoom - 2.45;
+  const fadeEnd = source.maxTierZoom - 1.2;
+  const baseStrength =
+    continuousZoom <= fadeStart ? 1 :
+    continuousZoom >= fadeEnd ? 0 :
+    (() => {
+      const t = clamp((continuousZoom - fadeStart) / Math.max(1e-6, fadeEnd - fadeStart), 0, 1);
+      const smooth = t * t * (3 - 2 * t);
+      return 1 - smooth;
+    })();
+  return clamp(baseStrength, 0, 1);
+}
+
+function resolveSampleWeightBoost(sampleProbability: number): number {
+  if (sampleProbability >= 1) return 1;
+  const effectiveStride = 1 / Math.max(sampleProbability, 1e-6);
+  return 1 + Math.log2(effectiveStride) * 0.28;
+}
+
+function resolveLowResScale(width: number, height: number, totalPointCount: number, rawZoom: number): number {
   const longestSide = Math.max(1, width, height);
+  const deviceScale = typeof window === "undefined" ? 1 : clamp(window.devicePixelRatio || 1, 1, 2.4);
+  const lowZoomBoost =
+    rawZoom <= 0.35 ? 1.42 :
+    rawZoom <= 0.55 ? 1.26 :
+    rawZoom <= 0.8 ? 1.14 :
+    1;
   const targetMaxSize =
-    totalPointCount > 160000 ? 288 :
-    totalPointCount > 80000 ? 384 :
-    totalPointCount > 30000 ? 512 :
+    totalPointCount > 160000 ? 896 :
+    totalPointCount > 80000 ? 1152 :
+    totalPointCount > 30000 ? 1408 :
     MAX_RASTER_SIZE;
   const minScale = MIN_RASTER_SIZE / longestSide;
   const maxScale = MAX_RASTER_SIZE / longestSide;
-  return clamp(targetMaxSize / longestSide, minScale, maxScale);
+  return clamp((targetMaxSize * deviceScale * lowZoomBoost) / longestSide, minScale, maxScale);
 }
 
 function buildViewportFrame(params: {
@@ -174,17 +330,20 @@ function buildViewportFrame(params: {
   blur: number;
   heatmapScale?: number;
 }): ViewportFrame {
-  const heatmapScale = params.heatmapScale ?? resolveLowResScale(params.logicalWidth, params.logicalHeight, params.totalPointCount);
+  const heatmapScale = params.heatmapScale ?? resolveLowResScale(params.logicalWidth, params.logicalHeight, params.totalPointCount, params.rawZoom);
   const rasterWidth = Math.max(MIN_RASTER_SIZE, Math.min(MAX_RASTER_SIZE, Math.round(params.logicalWidth * heatmapScale)));
   const rasterHeight = Math.max(MIN_RASTER_SIZE, Math.min(MAX_RASTER_SIZE, Math.round(params.logicalHeight * heatmapScale)));
   const rasterScaleX = rasterWidth / Math.max(1, params.logicalWidth);
   const rasterScaleY = rasterHeight / Math.max(1, params.logicalHeight);
   const effectiveScale = Math.min(rasterScaleX, rasterScaleY);
   const rawZoom = Math.max(1e-6, params.rawZoom);
-  const kernelRadiusPx = Math.max(1.5, params.radius * BASE_RADIUS_UNIT_PX * effectiveScale);
-  const blurRadiusPx = Math.max(1, params.blur * BASE_BLUR_UNIT_PX * effectiveScale);
+  const kernelRadiusPx = Math.max(0.75, params.radius * BASE_RADIUS_UNIT_PX * effectiveScale);
+  const blurRadiusPx = Math.max(0.6, params.blur * BASE_BLUR_UNIT_PX * effectiveScale);
   const outerWorldRadius = (kernelRadiusPx + blurRadiusPx) / Math.max(1e-6, rawZoom * effectiveScale);
-  const desiredCellWorldSize = 1 / Math.max(1e-6, rawZoom * effectiveScale);
+  const desiredCellWorldSize = Math.max(
+    outerWorldRadius * 0.4,
+    0.62 / Math.max(1e-6, rawZoom * effectiveScale),
+  );
 
   return {
     heatmapScale,
@@ -210,6 +369,32 @@ function resolvePointCount(data: HeatmapPointData | null): number {
 function hashCoordinate(value: number, seed: number): number {
   const normalized = Number.isFinite(value) ? Math.round(value * 1024) : 0;
   return Math.imul(seed ^ normalized, 0x45d9f3b) >>> 0;
+}
+
+function hashIntPair(x: number, y: number, seed = 0x9e3779b9): number {
+  let hash = Math.imul(seed ^ (x | 0), 0x85ebca6b) >>> 0;
+  hash = Math.imul(hash ^ (y | 0), 0xc2b2ae35) >>> 0;
+  hash ^= hash >>> 16;
+  return hash >>> 0;
+}
+
+function hashToUnitFloat(hash: number): number {
+  return (hash >>> 0) / 0xffffffff;
+}
+
+function resolveJitteredCoordinate(
+  center: number,
+  min: number,
+  max: number,
+  jitterUnit: number,
+  paddingFraction: number,
+  jitterFraction: number,
+): number {
+  const span = Math.max(1e-6, max - min);
+  const padding = Math.min(span * clamp(paddingFraction, 0.12, 0.32), span * 0.5 - 1e-6);
+  const jitterRange = Math.max(0, span * clamp(jitterFraction, 0.01, 0.22) - padding * 0.15);
+  const jitter = (jitterUnit * 2 - 1) * jitterRange;
+  return clamp(center + jitter, min + padding, max - padding);
 }
 
 function buildClipKey(polygons: readonly PreparedRoiPolygon[]): string {
@@ -296,6 +481,21 @@ function buildSourceData(data: HeatmapPointData | null, clipPolygons: readonly P
     ws = ws.slice(0, acceptedCount);
   }
 
+  const pointIndexItems: Array<{ minX: number; minY: number; maxX: number; maxY: number; value: number }> = [];
+  for (let index = 0; index < acceptedCount; index += 1) {
+    const x = xs[index]!;
+    const y = ys[index]!;
+    pointIndexItems.push({
+      minX: x,
+      minY: y,
+      maxX: x,
+      maxY: y,
+      value: index,
+    });
+  }
+  const pointIndex = createSpatialIndex<number>(64);
+  pointIndex.load(pointIndexItems);
+
   const maxDimension = Math.max(
     source?.width ?? 0,
     source?.height ?? 0,
@@ -328,6 +528,7 @@ function buildSourceData(data: HeatmapPointData | null, clipPolygons: readonly P
     xs,
     ys,
     ws,
+    pointIndex,
     cellSizes,
     levels: Array.from({ length: cellSizes.length }, () => null),
   };
@@ -345,6 +546,9 @@ function buildLevel(sourceData: HeatmapSourceData, levelIndex: number): HeatmapL
   if (cachedLevel) return cachedLevel;
 
   const currentCellSize = sourceData.cellSizes[levelIndex];
+  const levelT = sourceData.cellSizes.length <= 1 ? 0 : levelIndex / (sourceData.cellSizes.length - 1);
+  const adaptivePaddingFraction = 0.24 - levelT * 0.08;
+  const adaptiveJitterFraction = 0.035 + levelT * 0.11;
   const cells = new Map<string, {
     cellX: number;
     cellY: number;
@@ -385,13 +589,32 @@ function buildLevel(sourceData: HeatmapSourceData, levelIndex: number): HeatmapL
     if (cell.weight <= 0) return;
     const cellMinX = cell.cellX * currentCellSize;
     const cellMinY = cell.cellY * currentCellSize;
+    const centerX = cell.sumX / cell.weight;
+    const centerY = cell.sumY / cell.weight;
+    const jitterSeed = hashIntPair(cell.cellX, cell.cellY, Math.round(currentCellSize * 1024));
     const bin: HeatmapCell = {
       minX: cellMinX,
       minY: cellMinY,
       maxX: cellMinX + currentCellSize,
       maxY: cellMinY + currentCellSize,
-      worldX: cell.sumX / cell.weight,
-      worldY: cell.sumY / cell.weight,
+      worldX: centerX,
+      worldY: centerY,
+      renderWorldX: resolveJitteredCoordinate(
+        centerX,
+        cellMinX,
+        cellMinX + currentCellSize,
+        hashToUnitFloat(jitterSeed),
+        adaptivePaddingFraction,
+        adaptiveJitterFraction,
+      ),
+      renderWorldY: resolveJitteredCoordinate(
+        centerY,
+        cellMinY,
+        cellMinY + currentCellSize,
+        hashToUnitFloat(hashIntPair(cell.cellY, cell.cellX, jitterSeed ^ 0x68bc21eb)),
+        adaptivePaddingFraction,
+        adaptiveJitterFraction,
+      ),
       weight: cell.weight,
       count: cell.count,
     };
@@ -408,7 +631,12 @@ function buildLevel(sourceData: HeatmapSourceData, levelIndex: number): HeatmapL
 
   const index = createSpatialIndex<number>(32);
   index.load(items);
-  const level = { cellWorldSize: currentCellSize, bins, index };
+  const level = {
+    cellWorldSize: currentCellSize,
+    bins,
+    index,
+    normalizationUpperWeight: resolveNormalizationUpperWeight(bins, 1),
+  };
   sourceData.levels[levelIndex] = level;
   return level;
 }
@@ -418,7 +646,7 @@ function findLevelIndex(cellSizes: readonly number[], desiredCellWorldSize: numb
 
   if (previousIndex >= 0 && previousIndex < cellSizes.length) {
     const previousCellSize = cellSizes[previousIndex]!;
-    if (desiredCellWorldSize >= previousCellSize * 0.6 && desiredCellWorldSize <= previousCellSize * 1.8) {
+    if (desiredCellWorldSize >= previousCellSize * 0.52 && desiredCellWorldSize <= previousCellSize * 2.1) {
       return previousIndex;
     }
   }
@@ -439,20 +667,55 @@ function findLevelIndex(cellSizes: readonly number[], desiredCellWorldSize: numb
 function resolveLevelIndex(params: {
   cellSizes: readonly number[];
   desiredCellWorldSize: number;
+  zoomThreshold: number;
   maxRenderedPoints: number;
   viewBounds: [number, number, number, number];
   previousIndex: number;
 }): number {
-  const { cellSizes, desiredCellWorldSize, maxRenderedPoints, viewBounds, previousIndex } = params;
+  const { cellSizes, desiredCellWorldSize, zoomThreshold, maxRenderedPoints, viewBounds, previousIndex } = params;
   let index = findLevelIndex(cellSizes, desiredCellWorldSize, previousIndex);
   const budget = Math.max(MIN_VISIBLE_BUDGET, maxRenderedPoints);
-  while (index < cellSizes.length - 1 && estimateVisibleBinCount(viewBounds, cellSizes[index]!) > budget * 1.15) {
+  while (index < cellSizes.length - 1 && estimateVisibleBinCount(viewBounds, cellSizes[index]!) > budget * 1.28) {
     index += 1;
   }
-  while (index > 0 && estimateVisibleBinCount(viewBounds, cellSizes[index - 1]!) < budget * 0.72) {
+  while (index > 0 && estimateVisibleBinCount(viewBounds, cellSizes[index - 1]!) <= budget * 0.76) {
     index -= 1;
   }
-  return index;
+  return Math.max(0, Math.min(cellSizes.length - 1, index + resolveThresholdLevelBias(zoomThreshold)));
+}
+
+function resolveScreenLevelBlend(params: {
+  cellSizes: readonly number[];
+  desiredCellWorldSize: number;
+  zoomThreshold: number;
+  maxRenderedPoints: number;
+  viewBounds: [number, number, number, number];
+}): { lowerIndex: number; upperIndex: number; upperWeight: number } {
+  const { cellSizes, desiredCellWorldSize, zoomThreshold, maxRenderedPoints, viewBounds } = params;
+  if (cellSizes.length === 0) {
+    return { lowerIndex: 0, upperIndex: 0, upperWeight: 0 };
+  }
+
+  const stepLog = Math.log2(PYRAMID_SCALE_STEP);
+  const firstCellLog = Math.log2(Math.max(1e-6, cellSizes[0]!));
+  let desiredPosition =
+    (Math.log2(Math.max(1e-6, desiredCellWorldSize)) - firstCellLog) / Math.max(1e-6, stepLog) +
+    resolveThresholdLevelBias(zoomThreshold);
+
+  const budget = Math.max(MIN_VISIBLE_BUDGET, maxRenderedPoints);
+  let minimumBudgetIndex = 0;
+  while (
+    minimumBudgetIndex < cellSizes.length - 1 &&
+    estimateVisibleBinCount(viewBounds, cellSizes[minimumBudgetIndex]!) > budget * 1.12
+  ) {
+    minimumBudgetIndex += 1;
+  }
+
+  desiredPosition = clamp(desiredPosition, minimumBudgetIndex, cellSizes.length - 1);
+  const lowerIndex = Math.floor(desiredPosition);
+  const upperIndex = Math.min(cellSizes.length - 1, Math.ceil(desiredPosition));
+  const upperWeight = upperIndex === lowerIndex ? 0 : desiredPosition - lowerIndex;
+  return { lowerIndex, upperIndex, upperWeight };
 }
 
 function collectVisibleCells(level: HeatmapLevel, viewBounds: [number, number, number, number], outerWorldRadius: number): HeatmapCell[] {
@@ -473,11 +736,65 @@ function collectVisibleCells(level: HeatmapLevel, viewBounds: [number, number, n
   return visible;
 }
 
+function collectVisiblePointIndices(sourceData: HeatmapSourceData, viewBounds: [number, number, number, number], outerWorldRadius: number): number[] {
+  const hits = sourceData.pointIndex.search([
+    viewBounds[0] - outerWorldRadius,
+    viewBounds[1] - outerWorldRadius,
+    viewBounds[2] + outerWorldRadius,
+    viewBounds[3] + outerWorldRadius,
+  ]);
+  const visible = new Array<number>(hits.length);
+  let count = 0;
+  for (let index = 0; index < hits.length; index += 1) {
+    const hit = hits[index];
+    if (!hit) continue;
+    visible[count] = hit.value;
+    count += 1;
+  }
+  visible.length = count;
+  return visible;
+}
+
+function resolveSampleProbability(visiblePointCount: number, maxRenderedPoints: number): number {
+  const budget = Math.max(MIN_VISIBLE_BUDGET, maxRenderedPoints);
+  if (visiblePointCount <= budget) return 1;
+  return clamp(budget / Math.max(1, visiblePointCount), 1 / 65536, 1);
+}
+
+function resolveSampleStride(sampleProbability: number): number {
+  if (sampleProbability >= 1) return 1;
+  return Math.max(1, Math.round(1 / Math.max(1e-6, sampleProbability)));
+}
+
+function shouldKeepSample(pointIndex: number, sampleProbability: number): boolean {
+  if (sampleProbability >= 1) return true;
+  const sampleHash = hashIntPair(pointIndex, 0x51ed270b, 0x68bc21eb);
+  return hashToUnitFloat(sampleHash) <= clamp(sampleProbability, 0, 1);
+}
+
 function resolvePointAlpha(binCount: number, kernelOuterRadiusPx: number, rasterWidth: number, rasterHeight: number): number {
   const rasterArea = Math.max(1, rasterWidth * rasterHeight);
   const kernelArea = Math.PI * kernelOuterRadiusPx * kernelOuterRadiusPx;
   const coverage = (Math.max(1, binCount) * kernelArea) / rasterArea;
-  return clamp(0.2 / Math.sqrt(Math.max(1, coverage)), 0.05, 0.22);
+  return clamp(0.085 / Math.sqrt(Math.max(1, coverage)), 0.012, 0.075);
+}
+
+function smoothHeatmapValue(previousValue: number, nextValue: number, riseFactor: number, fallFactor: number): number {
+  if (!Number.isFinite(previousValue) || previousValue <= 0) {
+    return nextValue;
+  }
+  const factor = nextValue >= previousValue ? riseFactor : fallFactor;
+  return previousValue + (nextValue - previousValue) * clamp(factor, 0, 1);
+}
+
+function shouldFreezeScreenHeatmapAtMinZoom(
+  renderer: NonNullable<ReturnType<typeof useViewerContext>["rendererRef"]["current"]>,
+  rawZoom: number,
+): boolean {
+  if (!renderer.isViewAnimating()) return false;
+  const zoomRange = renderer.getZoomRange();
+  const minZoom = Math.max(1e-6, zoomRange.minZoom);
+  return rawZoom <= minZoom * 1.075;
 }
 
 function getWebglRenderer(runtime: HeatmapRuntime): HeatmapWebGLRenderer | null {
@@ -556,10 +873,11 @@ function buildFixedState(params: {
   radius: number;
   blur: number;
   fixedZoom?: number;
+  zoomThreshold: number;
+  densityContrast: number;
   maxRenderedPoints: number;
 }): HeatmapFixedState | null {
-  const { runtime, sourceData, renderer, source, logicalWidth, logicalHeight, radius, blur, fixedZoom, maxRenderedPoints } = params;
-  if (sourceData.cellSizes.length === 0) return null;
+  const { sourceData, renderer, source, logicalWidth, logicalHeight, radius, blur, fixedZoom, maxRenderedPoints } = params;
 
   const currentRawZoom = Math.max(1e-6, renderer.getViewState().zoom);
   const referenceZoom = fixedZoom ?? resolveContinuousZoom(currentRawZoom, source);
@@ -572,23 +890,11 @@ function buildFixedState(params: {
     radius,
     blur,
   });
-
   const viewBounds = renderer.getViewBounds();
-  const levelIndex = resolveLevelIndex({
-    cellSizes: sourceData.cellSizes,
-    desiredCellWorldSize: frame.desiredCellWorldSize,
-    maxRenderedPoints,
-    viewBounds,
-    previousIndex: runtime.screenLevelIndex,
-  });
-  const level = buildLevel(sourceData, levelIndex);
-  if (!level) return null;
-  const visibleCells = collectVisibleCells(level, viewBounds, frame.outerWorldRadius);
-  let normalizationMaxWeight = 1;
-  for (let index = 0; index < visibleCells.length; index += 1) {
-    const weight = visibleCells[index]!.weight;
-    if (weight > normalizationMaxWeight) normalizationMaxWeight = weight;
-  }
+  const visiblePointIndices = collectVisiblePointIndices(sourceData, viewBounds, frame.outerWorldRadius);
+  const sampleProbability = resolveSampleProbability(visiblePointIndices.length, maxRenderedPoints);
+  const sampleStride = resolveSampleStride(sampleProbability);
+  const effectiveScale = Math.min(frame.rasterScaleX, frame.rasterScaleY);
 
   return {
     dataRef: sourceData.dataRef,
@@ -600,11 +906,11 @@ function buildFixedState(params: {
     referenceZoom,
     referenceRawZoom,
     heatmapScale: frame.heatmapScale,
-    levelIndex,
-    kernelRadiusPx: frame.kernelRadiusPx,
-    blurRadiusPx: frame.blurRadiusPx,
-    pointAlpha: resolvePointAlpha(visibleCells.length, frame.kernelRadiusPx + frame.blurRadiusPx, frame.rasterWidth, frame.rasterHeight),
-    normalizationMaxWeight,
+    kernelWorldRadius: frame.kernelRadiusPx / Math.max(1e-6, referenceRawZoom * effectiveScale),
+    blurWorldRadius: frame.blurRadiusPx / Math.max(1e-6, referenceRawZoom * effectiveScale),
+    sampleProbability,
+    sampleStride,
+    pointAlpha: resolvePointAlpha(visiblePointIndices.length, frame.kernelRadiusPx + frame.blurRadiusPx, frame.rasterWidth, frame.rasterHeight),
   };
 }
 
@@ -612,6 +918,7 @@ function drawHeatmapWebgl(params: {
   ctx: CanvasRenderingContext2D;
   runtime: HeatmapRuntime;
   renderer: NonNullable<ReturnType<typeof useViewerContext>["rendererRef"]["current"]>;
+  source: WsiImageSource;
   logicalWidth: number;
   logicalHeight: number;
   frame: ViewportFrame;
@@ -620,10 +927,12 @@ function drawHeatmapWebgl(params: {
   pointAlpha: number;
   gradient: readonly string[];
   opacity: number;
+  densityContrast: number;
   backgroundColor: string | null;
   clipPolygons: readonly PreparedRoiPolygon[];
 }): number {
-  const { ctx, runtime, renderer, logicalWidth, logicalHeight, frame, cells, normalizationMaxWeight, pointAlpha, gradient, opacity, backgroundColor, clipPolygons } = params;
+  const { ctx, runtime, renderer, logicalWidth, logicalHeight, frame, cells, normalizationMaxWeight, pointAlpha, gradient, opacity, densityContrast, backgroundColor, clipPolygons } = params;
+  const { source } = params;
   const webgl = getWebglRenderer(runtime);
   if (!webgl || cells.length === 0) {
     return 0;
@@ -645,7 +954,148 @@ function drawHeatmapWebgl(params: {
 
   for (let index = 0; index < cells.length; index += 1) {
     const cell = cells[index]!;
-    const projected = renderer.worldToScreen(cell.worldX, cell.worldY);
+    const projected = renderer.worldToScreen(cell.renderWorldX, cell.renderWorldY);
+    if (!Array.isArray(projected) || projected.length < 2) continue;
+
+    const screenX = Number(projected[0]);
+    const screenY = Number(projected[1]);
+    if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) continue;
+
+    const rasterX = screenX * frame.rasterScaleX;
+    const rasterY = screenY * frame.rasterScaleY;
+    if (
+      rasterX < -outerRadiusPx ||
+      rasterY < -outerRadiusPx ||
+      rasterX > frame.rasterWidth + outerRadiusPx ||
+      rasterY > frame.rasterHeight + outerRadiusPx
+    ) {
+      continue;
+    }
+
+    const offset = drawCount * 2;
+    const supportFactor = resolveCellSupportFactor(cell.count);
+    const normalizedWeight = resolveNormalizedDensityWeight(cell.weight, normalizationMaxWeight, densityContrast);
+    const effectiveWeight = normalizedWeight * supportFactor;
+    if (effectiveWeight <= 0.025) continue;
+
+    positions[offset] = rasterX;
+    positions[offset + 1] = rasterY;
+    weights[drawCount] = effectiveWeight;
+    drawCount += 1;
+  }
+
+  if (drawCount <= 0) {
+    return 0;
+  }
+
+  const rendered = webgl.render({
+    width: frame.rasterWidth,
+    height: frame.rasterHeight,
+    positions,
+    weights,
+    count: drawCount,
+    kernelRadiusPx: frame.kernelRadiusPx,
+    blurRadiusPx: frame.blurRadiusPx,
+    pointAlpha,
+    gradient,
+    opacity,
+    cutoff: resolveDensityCutoff(densityContrast),
+    gain: resolveDensityGain(densityContrast),
+    gamma: resolveDensityGamma(densityContrast),
+    bias: resolveDensityBias(densityContrast),
+    stretch: resolveDensityStretch(densityContrast, frame.rawZoom, source),
+  });
+  if (!rendered) {
+    return 0;
+  }
+
+  ctx.save();
+  if (clipPolygons.length > 0) {
+    applyClipPath(ctx, renderer, clipPolygons);
+  }
+  if (backgroundColor) {
+    ctx.fillStyle = backgroundColor;
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+  }
+  ctx.globalAlpha = 1;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(webgl.canvas, 0, 0, frame.rasterWidth, frame.rasterHeight, 0, 0, logicalWidth, logicalHeight);
+  ctx.restore();
+
+  return drawCount;
+}
+
+function drawHeatmapWebglPoints(params: {
+  ctx: CanvasRenderingContext2D;
+  runtime: HeatmapRuntime;
+  renderer: NonNullable<ReturnType<typeof useViewerContext>["rendererRef"]["current"]>;
+  source: WsiImageSource;
+  logicalWidth: number;
+  logicalHeight: number;
+  frame: ViewportFrame;
+  sourceData: HeatmapSourceData;
+  visiblePointIndices: readonly number[];
+  sampleProbability: number;
+  sampleStride: number;
+  pointAlpha: number;
+  gradient: readonly string[];
+  opacity: number;
+  densityContrast: number;
+  backgroundColor: string | null;
+  clipPolygons: readonly PreparedRoiPolygon[];
+}): number {
+  const {
+    ctx,
+    runtime,
+    renderer,
+    source,
+    logicalWidth,
+    logicalHeight,
+    frame,
+    sourceData,
+    visiblePointIndices,
+    sampleProbability,
+    sampleStride,
+    pointAlpha,
+    gradient,
+    opacity,
+    densityContrast,
+    backgroundColor,
+    clipPolygons,
+  } = params;
+  const webgl = getWebglRenderer(runtime);
+  if (!webgl || visiblePointIndices.length === 0) {
+    return 0;
+  }
+
+  const targetCapacity = Math.min(
+    visiblePointIndices.length,
+    Math.max(64, Math.ceil(visiblePointIndices.length * Math.min(1, sampleProbability * 1.15))),
+  );
+  if (targetCapacity > runtime.webglCapacity) {
+    runtime.webglCapacity = targetCapacity;
+    runtime.webglPositions = new Float32Array(targetCapacity * 2);
+    runtime.webglWeights = new Float32Array(targetCapacity);
+  }
+  const positions = runtime.webglPositions;
+  const weights = runtime.webglWeights;
+  if (!positions || !weights) {
+    return 0;
+  }
+
+  const outerRadiusPx = frame.kernelRadiusPx + frame.blurRadiusPx;
+  const sampleWeightBoost = resolveSampleWeightBoost(sampleProbability);
+  let drawCount = 0;
+
+  for (let visibleIndex = 0; visibleIndex < visiblePointIndices.length; visibleIndex += 1) {
+    const pointIndex = visiblePointIndices[visibleIndex]!;
+    if (!shouldKeepSample(pointIndex, sampleProbability)) continue;
+
+    const worldX = sourceData.xs[pointIndex];
+    const worldY = sourceData.ys[pointIndex];
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) continue;
+
+    const projected = renderer.worldToScreen(worldX, worldY);
     if (!Array.isArray(projected) || projected.length < 2) continue;
 
     const screenX = Number(projected[0]);
@@ -666,11 +1116,7 @@ function drawHeatmapWebgl(params: {
     const offset = drawCount * 2;
     positions[offset] = rasterX;
     positions[offset + 1] = rasterY;
-    weights[drawCount] = clamp(
-      Math.log1p(cell.weight) / Math.log1p(Math.max(1e-6, normalizationMaxWeight)),
-      0,
-      1,
-    );
+    weights[drawCount] = Math.max(0, (sourceData.ws[pointIndex] ?? 0) * sampleWeightBoost);
     drawCount += 1;
   }
 
@@ -689,6 +1135,11 @@ function drawHeatmapWebgl(params: {
     pointAlpha,
     gradient,
     opacity,
+    cutoff: resolveDensityCutoff(densityContrast),
+    gain: resolveDensityGain(densityContrast),
+    gamma: resolveDensityGamma(densityContrast),
+    bias: resolveDensityBias(densityContrast),
+    stretch: resolveDensityStretch(densityContrast, frame.rawZoom, source),
   });
   if (!rendered) {
     return 0;
@@ -726,59 +1177,9 @@ function drawHeatmap(params: {
   }
 
   const rawZoom = Math.max(1e-6, renderer.getViewState().zoom);
+  const zoomVisibilityStrength = resolveZoomVisibilityStrength(rawZoom, source, state.zoomThreshold);
   const viewBounds = renderer.getViewBounds();
-
-  let frame: ViewportFrame;
-  let levelIndex: number;
-  let pointAlpha: number;
-  let normalizationMaxWeight: number;
-
-  if (state.scaleMode === "fixed-zoom") {
-    const fixedState = runtime.fixedState;
-    if (!fixedState) return null;
-
-    frame = buildViewportFrame({
-      logicalWidth,
-      logicalHeight,
-      totalPointCount: sourceData.pointCount,
-      rawZoom,
-      radius: state.radius,
-      blur: state.blur,
-      heatmapScale: fixedState.heatmapScale,
-    });
-    const zoomRatio = rawZoom / Math.max(1e-6, fixedState.referenceRawZoom);
-    frame.kernelRadiusPx = Math.max(1.5, fixedState.kernelRadiusPx * zoomRatio);
-    frame.blurRadiusPx = Math.max(1, fixedState.blurRadiusPx * zoomRatio);
-    frame.outerWorldRadius = (frame.kernelRadiusPx + frame.blurRadiusPx) / Math.max(1e-6, rawZoom * frame.heatmapScale);
-    levelIndex = fixedState.levelIndex;
-    pointAlpha = fixedState.pointAlpha;
-    normalizationMaxWeight = fixedState.normalizationMaxWeight;
-  } else {
-    frame = buildViewportFrame({
-      logicalWidth,
-      logicalHeight,
-      totalPointCount: sourceData.pointCount,
-      rawZoom,
-      radius: state.radius,
-      blur: state.blur,
-    });
-    levelIndex = resolveLevelIndex({
-      cellSizes: sourceData.cellSizes,
-      desiredCellWorldSize: frame.desiredCellWorldSize,
-      maxRenderedPoints: state.maxRenderedPoints,
-      viewBounds,
-      previousIndex: runtime.screenLevelIndex,
-    });
-    runtime.screenLevelIndex = levelIndex;
-    pointAlpha = 0;
-    normalizationMaxWeight = 1;
-  }
-
-  const resolvedLevelIndex = Math.max(0, Math.min(levelIndex, sourceData.cellSizes.length - 1));
-  const level = buildLevel(sourceData, resolvedLevelIndex);
-  if (!level) return null;
-  const visibleCells = collectVisibleCells(level, viewBounds, frame.outerWorldRadius);
-  if (visibleCells.length === 0) {
+  if (zoomVisibilityStrength <= 0.001) {
     return {
       pointCount: sourceData.pointCount,
       renderTimeMs: 0,
@@ -789,37 +1190,122 @@ function drawHeatmap(params: {
     };
   }
 
-  let visiblePointCount = 0;
   if (state.scaleMode !== "fixed-zoom") {
-    for (let index = 0; index < visibleCells.length; index += 1) {
-      const weight = visibleCells[index]!.weight;
-      if (weight > normalizationMaxWeight) normalizationMaxWeight = weight;
-      visiblePointCount += visibleCells[index]!.count;
+    const frame = buildViewportFrame({
+      logicalWidth,
+      logicalHeight,
+      totalPointCount: sourceData.pointCount,
+      rawZoom,
+      radius: state.radius,
+      blur: state.blur,
+    });
+    const visiblePointIndices = collectVisiblePointIndices(sourceData, viewBounds, frame.outerWorldRadius);
+    if (visiblePointIndices.length === 0) {
+      return {
+        pointCount: sourceData.pointCount,
+        renderTimeMs: 0,
+        visiblePointCount: 0,
+        renderedBinCount: 0,
+        sampleStride: 1,
+        maxDensity: 0,
+      };
     }
-    pointAlpha = resolvePointAlpha(
-      visibleCells.length,
+
+    const sampleProbability = resolveSampleProbability(visiblePointIndices.length, state.maxRenderedPoints);
+    const sampleStride = resolveSampleStride(sampleProbability);
+    const targetPointAlpha = resolvePointAlpha(
+      visiblePointIndices.length,
       frame.kernelRadiusPx + frame.blurRadiusPx,
       frame.rasterWidth,
       frame.rasterHeight,
     );
-  } else {
-    for (let index = 0; index < visibleCells.length; index += 1) {
-      visiblePointCount += visibleCells[index]!.count;
-    }
+    runtime.screenLevelIndex = -1;
+    runtime.screenSecondaryLevelIndex = -1;
+    runtime.screenSecondaryLevelWeight = 0;
+    runtime.screenNormalizationMaxWeight = 1;
+    runtime.screenPointAlpha = smoothHeatmapValue(runtime.screenPointAlpha, targetPointAlpha, 0.12, 0.08);
+    runtime.screenVisibilityStrength = renderer.isViewAnimating()
+      ? smoothHeatmapValue(runtime.screenVisibilityStrength, zoomVisibilityStrength, 0.16, 0.12)
+      : zoomVisibilityStrength;
+
+    const renderedPointCount = drawHeatmapWebglPoints({
+      ctx,
+      runtime,
+      renderer,
+      source,
+      logicalWidth,
+      logicalHeight,
+      frame,
+      sourceData,
+      visiblePointIndices,
+      sampleProbability,
+      sampleStride,
+      pointAlpha: runtime.screenPointAlpha * Math.max(0.08, runtime.screenVisibilityStrength),
+      gradient: state.gradient,
+      opacity: state.opacity * runtime.screenVisibilityStrength,
+      densityContrast: state.densityContrast,
+      backgroundColor: state.backgroundColor,
+      clipPolygons: state.clipPolygons,
+    });
+
+    return {
+      pointCount: sourceData.pointCount,
+      renderTimeMs: 0,
+      visiblePointCount: visiblePointIndices.length,
+      renderedBinCount: renderedPointCount,
+      sampleStride,
+      maxDensity: Math.round(runtime.screenPointAlpha * 255),
+    };
   }
 
-  const renderedBinCount = drawHeatmapWebgl({
+  const fixedState = runtime.fixedState;
+  if (!fixedState) return null;
+
+  const frame = buildViewportFrame({
+    logicalWidth,
+    logicalHeight,
+    totalPointCount: sourceData.pointCount,
+    rawZoom,
+    radius: state.radius,
+    blur: state.blur,
+    heatmapScale: fixedState.heatmapScale,
+  });
+  const effectiveScale = Math.min(frame.rasterScaleX, frame.rasterScaleY);
+  frame.kernelRadiusPx = Math.max(0.75, fixedState.kernelWorldRadius * rawZoom * effectiveScale);
+  frame.blurRadiusPx = Math.max(0.6, fixedState.blurWorldRadius * rawZoom * effectiveScale);
+  frame.outerWorldRadius = fixedState.kernelWorldRadius + fixedState.blurWorldRadius;
+
+  const visiblePointIndices = collectVisiblePointIndices(sourceData, viewBounds, frame.outerWorldRadius);
+  if (visiblePointIndices.length === 0) {
+    return {
+      pointCount: sourceData.pointCount,
+      renderTimeMs: 0,
+      visiblePointCount: 0,
+      renderedBinCount: 0,
+      sampleStride: 1,
+      maxDensity: 0,
+    };
+  }
+
+  runtime.screenPointAlpha = fixedState.pointAlpha;
+  runtime.screenVisibilityStrength = zoomVisibilityStrength;
+
+  const renderedPointCount = drawHeatmapWebglPoints({
     ctx,
     runtime,
     renderer,
+    source,
     logicalWidth,
     logicalHeight,
     frame,
-    cells: visibleCells,
-    normalizationMaxWeight,
-    pointAlpha,
+    sourceData,
+    visiblePointIndices,
+    sampleProbability: fixedState.sampleProbability,
+    sampleStride: fixedState.sampleStride,
+    pointAlpha: fixedState.pointAlpha * Math.max(0.08, zoomVisibilityStrength),
     gradient: state.gradient,
-    opacity: state.opacity,
+    opacity: state.opacity * zoomVisibilityStrength,
+    densityContrast: state.densityContrast,
     backgroundColor: state.backgroundColor,
     clipPolygons: state.clipPolygons,
   });
@@ -827,10 +1313,10 @@ function drawHeatmap(params: {
   return {
     pointCount: sourceData.pointCount,
     renderTimeMs: 0,
-    visiblePointCount,
-    renderedBinCount,
-    sampleStride: 1,
-    maxDensity: Math.round(normalizationMaxWeight * 255),
+    visiblePointCount: visiblePointIndices.length,
+    renderedBinCount: renderedPointCount,
+    sampleStride: fixedState.sampleStride,
+    maxDensity: Math.round(fixedState.pointAlpha * 255),
   };
 }
 
@@ -844,6 +1330,8 @@ export function HeatmapLayer({
   backgroundColor = null,
   scaleMode = DEFAULT_SCALE_MODE,
   fixedZoom,
+  zoomThreshold = 0,
+  densityContrast = DEFAULT_DENSITY_CONTRAST,
   clipToRegions,
   zIndex = 5,
   maxRenderedPoints = DEFAULT_MAX_RENDERED_POINTS,
@@ -863,6 +1351,11 @@ export function HeatmapLayer({
     sourceData: null,
     fixedState: null,
     screenLevelIndex: -1,
+    screenSecondaryLevelIndex: -1,
+    screenSecondaryLevelWeight: 0,
+    screenPointAlpha: 0,
+    screenNormalizationMaxWeight: 1,
+    screenVisibilityStrength: 1,
     webgl: undefined,
     webglWarningIssued: false,
     webglPositions: null,
@@ -874,12 +1367,14 @@ export function HeatmapLayer({
     data,
     visible,
     opacity,
-    radius: clamp(radius, 0.25, 128),
-    blur: clamp(blur, 0.25, 128),
+    radius: clamp(radius, 0.05, 128),
+    blur: clamp(blur, 0.05, 128),
     gradient,
     backgroundColor,
     scaleMode,
     fixedZoom,
+    zoomThreshold,
+    densityContrast: clamp(densityContrast, 0, MAX_DENSITY_CONTRAST),
     clipPolygons,
     clipKey,
     maxRenderedPoints: Math.max(MIN_VISIBLE_BUDGET, Math.floor(maxRenderedPoints)),
@@ -890,12 +1385,14 @@ export function HeatmapLayer({
     data,
     visible,
     opacity,
-    radius: clamp(radius, 0.25, 128),
-    blur: clamp(blur, 0.25, 128),
+    radius: clamp(radius, 0.05, 128),
+    blur: clamp(blur, 0.05, 128),
     gradient,
     backgroundColor,
     scaleMode,
     fixedZoom,
+    zoomThreshold,
+    densityContrast: clamp(densityContrast, 0, MAX_DENSITY_CONTRAST),
     clipPolygons,
     clipKey,
     maxRenderedPoints: Math.max(MIN_VISIBLE_BUDGET, Math.floor(maxRenderedPoints)),
@@ -929,6 +1426,8 @@ export function HeatmapLayer({
           radius: state.radius,
           blur: state.blur,
           fixedZoom: state.fixedZoom,
+          zoomThreshold: state.zoomThreshold,
+          densityContrast: state.densityContrast,
           maxRenderedPoints: state.maxRenderedPoints,
         });
       } else if (state.scaleMode !== "fixed-zoom") {
@@ -958,6 +1457,11 @@ export function HeatmapLayer({
       runtimeRef.current.sourceData = null;
       runtimeRef.current.fixedState = null;
       runtimeRef.current.screenLevelIndex = -1;
+      runtimeRef.current.screenSecondaryLevelIndex = -1;
+      runtimeRef.current.screenSecondaryLevelWeight = 0;
+      runtimeRef.current.screenPointAlpha = 0;
+      runtimeRef.current.screenNormalizationMaxWeight = 1;
+      runtimeRef.current.screenVisibilityStrength = 1;
       runtimeRef.current.webgl?.destroy();
       runtimeRef.current.webgl = undefined;
       runtimeRef.current.webglPositions = null;
@@ -970,13 +1474,23 @@ export function HeatmapLayer({
     runtimeRef.current.sourceData = null;
     runtimeRef.current.fixedState = null;
     runtimeRef.current.screenLevelIndex = -1;
+    runtimeRef.current.screenSecondaryLevelIndex = -1;
+    runtimeRef.current.screenSecondaryLevelWeight = 0;
+    runtimeRef.current.screenPointAlpha = 0;
+    runtimeRef.current.screenNormalizationMaxWeight = 1;
+    runtimeRef.current.screenVisibilityStrength = 1;
     requestOverlayRedraw();
   }, [data?.positions, data?.weights, data?.count, clipKey, requestOverlayRedraw]);
 
   useEffect(() => {
     runtimeRef.current.fixedState = null;
+    runtimeRef.current.screenSecondaryLevelIndex = -1;
+    runtimeRef.current.screenSecondaryLevelWeight = 0;
+    runtimeRef.current.screenPointAlpha = 0;
+    runtimeRef.current.screenNormalizationMaxWeight = 1;
+    runtimeRef.current.screenVisibilityStrength = 1;
     requestOverlayRedraw();
-  }, [radius, blur, scaleMode, fixedZoom, maxRenderedPoints, requestOverlayRedraw]);
+  }, [radius, blur, scaleMode, fixedZoom, zoomThreshold, densityContrast, maxRenderedPoints, requestOverlayRedraw]);
 
   useEffect(() => {
     requestOverlayRedraw();
@@ -986,9 +1500,21 @@ export function HeatmapLayer({
 }
 
 export const __heatmapLayerInternals = {
+  applyZoomThreshold,
   buildClipKey,
+  resolveCellSupportFactor,
   resolveContinuousZoom,
+  resolveDensityCutoff,
+  resolveDensityBias,
+  resolveDensityGain,
+  resolveDensityGamma,
+  resolveDensityStretch,
+  resolveNormalizedDensityWeight,
+  resolveNormalizationUpperWeight,
+  resolveDensityWeightExponent,
   resolveRawZoomFromContinuousZoom,
   resolvePointCount,
+  resolveThresholdLevelBias,
+  resolveZoomVisibilityStrength,
   isSameHeatmapInput,
 };

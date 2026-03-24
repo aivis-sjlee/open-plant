@@ -333,8 +333,10 @@ import {
 | `backgroundColor` | `string \| null` | 기본 `null` |
 | `scaleMode` | `"screen" \| "fixed-zoom"` | 최소 지원 모드 |
 | `fixedZoom` | `number` | `scaleMode="fixed-zoom"`일 때의 continuous zoom 기준값 |
+| `zoomThreshold` | `number` | heatmap이 반응하는 유효 줌을 뒤로 미루는 continuous zoom offset. 양수일수록 더 높은 실제 줌까지 heatmap이 크게 유지됨 |
+| `densityContrast` | `number` | sparse 영역은 더 눌러두고 dense 영역은 더 빨리 강조하는 대비 계수 |
 | `clipToRegions` | `WsiRegion[]` | ROI 내부로 mask + point filter |
-| `maxRenderedPoints` | `number` | visible bin budget. 기본 `24000` |
+| `maxRenderedPoints` | `number` | visible bin budget. 기본 `48000` |
 | `zIndex` | `number` | 오버레이 draw priority |
 | `onStats` | `(stats) => void` | point count / render time 등 |
 
